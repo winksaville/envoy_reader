@@ -6,6 +6,20 @@ import requests as requests_sync
 import requests_async as requests
 import re
 
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# add formatter to ch
+ch.setFormatter(formatter)
+
+# add ch to logger
+logger.addHandler(ch)
+
 """Module to read production and consumption values from an Enphase Envoy on
  the local network"""
 
@@ -29,19 +43,24 @@ class EnvoyReader():
                                          "your Envoy device.")
 
     def __init__(self, host):
+        logger.debug('__init__:+')
+
         self.host = host.lower()
         self.endpoint_type = ""
         self.endpoint_url = ""
         self.serial_number_last_six = ""
+        logger.debug('__init__:-')
 
     async def detect_model(self):
         """Method to determine if the Envoy supports consumption values or
          only production"""
+        logger.debug('detect_model:+')
         self.endpoint_url = "http://{}/production.json".format(self.host)
         response = await requests.get(
             self.endpoint_url, timeout=30, allow_redirects=False)
         if response.status_code == 200 and len(response.json()) >= 2:
             self.endpoint_type = "PC"
+            logger.debug('detect_model:- PC')
             return
         else:
             self.endpoint_url = "http://{}/api/v1/production".format(self.host)
@@ -49,6 +68,7 @@ class EnvoyReader():
                 self.endpoint_url, timeout=30, allow_redirects=False)
             if response.status_code == 200:
                 self.endpoint_type = "P"       # Envoy-C, production only
+                logger.debug('detect_model:- P')
                 return
             else:
                 self.endpoint_url = "http://{}/production".format(self.host)
@@ -56,8 +76,10 @@ class EnvoyReader():
                     self.endpoint_url, timeout=30, allow_redirects=False)
                 if response.status_code == 200:
                     self.endpoint_type = "P0"       # older Envoy-C
+                    logger.debug('detect_model:- P0')
                     return
 
+        logger.debug('detect_model:- ??')
         self.endpoint_url = ""
         raise RuntimeError(
             "Could not connect or determine Envoy model. " +
@@ -65,15 +87,26 @@ class EnvoyReader():
 
     async def get_serial_number(self):
         """Method to get last six digits of Envoy serial number for auth"""
+        logger.debug('get_serial_number:+')
         try:
             response = await requests.get(
                 "http://{}/info.xml".format(self.host),
                 timeout=30, allow_redirects=False)
             if len(response.text) > 0:
-                sn = response.text.split("<sn>")[1].split("</sn>")[0][-6:]
-                self.serial_number_last_six = sn
+                #logger.debug('get_serial_number: response={}'.format(response.text))
+                right_of_split = response.text.split("<sn>")[1]
+                full_sn = right_of_split.split("</sn>")[0]
+                logger.debug('get_serial_number: full_sn={}'.format(full_sn))
+                last_six = full_sn[-6:]
+                logger.debug('get_serial_number: last_six={}'.format(last_six))
+                self.serial_number_last_six = last_six
+
+                #sn = response.text.split("<sn>")[1].split("</sn>")[0][-6:]
+                #self.serial_number_last_six = sn
         except requests.exceptions.ConnectionError:
+            logger.debug('get_serial_number:- ??')
             return self.create_connect_errormessage()
+        logger.debug('get_serial_number:- sn={}'.format(self.serial_number_last_six))
         # except
         #     print(
         #         "Unable to find device serial number, " +
@@ -81,6 +114,7 @@ class EnvoyReader():
 
     async def call_api(self):
         """Method to call the Envoy API"""
+        logger.debug('call_api:+')
         # detection of endpoint if not already known
         if self.endpoint_type == "":
             await self.detect_model()
@@ -88,9 +122,12 @@ class EnvoyReader():
         response = await requests.get(
             self.endpoint_url, timeout=30, allow_redirects=False)
         if self.endpoint_type == "P" or self.endpoint_type == "PC":
+            logger.debug('call_api:- response.json()={}'.format(response.json()))
             return response.json()     # these Envoys have .json
         if self.endpoint_type == "P0":
+            logger.debug('call_api:- response.text={}'.format(response.text))
             return response.text       # these Envoys have .html
+        logger.debug('call_api:- ??')
 
     def create_connect_errormessage(self):
         """Create error message if unable to connect to Envoy"""
@@ -107,19 +144,27 @@ class EnvoyReader():
 
     async def production(self):
         """Call API and parse production values from response"""
+        logger.debug('production:+')
         if self.endpoint_type == "":
+            logger.debug('production: await detect_mode')
             await self.detect_model()
+            logger.debug('production: done detect_mode')
 
         try:
             if self.endpoint_type == "PC":
+                logger.debug('production: PC await call_api')
                 raw_json = await self.call_api()
                 production = raw_json["production"][1]["wNow"]
+                logger.debug('production: PC done call_api production={}'.format(production))
             else:
                 if self.endpoint_type == "P":
+                    logger.debug('production: P await call_api')
                     raw_json = await self.call_api()
                     production = raw_json["wattsNow"]
+                    logger.debug('production: P done call_api production={}'.format(production))
                 else:
                     if self.endpoint_type == "P0":
+                        logger.debug('production: P0 await call_api')
                         text = await self.call_api()
                         match = re.search(
                             PRODUCTION_REGEX, text, re.MULTILINE)
@@ -136,6 +181,7 @@ class EnvoyReader():
                             raise RuntimeError(
                                 "No match for production, check REGEX  "
                                 + text)
+                        logger.debug('production: P0 done call_api production={}'.format(production))
             return int(production)
 
         except requests.exceptions.ConnectionError:
@@ -328,17 +374,25 @@ class EnvoyReader():
     async def inverters_production(self):
         """Hit a different Envoy endpoint and get the production values for
          individual inverters"""
+        logger.debug('inverters_production:+')
         if self.serial_number_last_six == "":
+            logger.debug('inverters_production: await get_serial_number')
             await self.get_serial_number()
+            logger.debug('inverters_production: done get_serial_number={}'.format(self.serial_number_last_six))
         try:
+            logger.debug('inverters_production: call requests_sync.get(api/v1/production/inverters)')
             response = requests_sync.get(
                 "http://{}/api/v1/production/inverters"
                 .format(self.host),
                 auth=HTTPDigestAuth("envoy",
                                     self.serial_number_last_six))
+            logger.debug('inverters_production: done requests_sync.get(api/v1/production/inverters) reponse.json={}'.format(response.json()))
             response_dict = {}
             for item in response.json():
+                logger.debug('inverters_production: sn={} lastReportsWatts={}'.format(item["serialNumber"], item["lastReportWatts"]))
                 response_dict[item["serialNumber"]] = item["lastReportWatts"]
+            #logger.debug('inverters_production:- response_dict={}'.format(response_dict))
+            logger.debug('inverters_production:-')
             return response_dict
         except requests.exceptions.ConnectionError:
             return self.create_connect_errormessage()
@@ -351,25 +405,36 @@ class EnvoyReader():
         print("Reading...")
         loop = asyncio.get_event_loop()
         results = loop.run_until_complete(asyncio.gather(
-            self.production(),
-            self.consumption(),
-            self.daily_production(),
-            self.daily_consumption(),
-            self.seven_days_production(),
-            self.seven_days_consumption(),
-            self.lifetime_production(),
-            self.lifetime_consumption(),
-            self.inverters_production()))
+            #self.production(),
+            #self.consumption(),
+            self.inverters_production(),
+        ))
+        print("\nresults:")
 
-        print("production:              {}".format(results[0]))
-        print("consumption:             {}".format(results[1]))
-        print("daily_production:        {}".format(results[2]))
-        print("daily_consumption:       {}".format(results[3]))
-        print("seven_days_production:   {}".format(results[4]))
-        print("seven_days_consumption:  {}".format(results[5]))
-        print("lifetime_production:     {}".format(results[6]))
-        print("lifetime_consumption:    {}".format(results[7]))
-        print("inverters_production:   {}".format(results[8]))
+        #print("production:              {}".format(results[0]))
+        #print("consumption:             {}".format(results[1]))
+        print("inverters_production:    {}".format(results[0]))
+
+        #results = loop.run_until_complete(asyncio.gather(
+        #    self.production(),
+        #    self.consumption(),
+        #    self.daily_production(),
+        #    self.daily_consumption(),
+        #    self.seven_days_production(),
+        #    self.seven_days_consumption(),
+        #    self.lifetime_production(),
+        #    self.lifetime_consumption(),
+        #    self.inverters_production()))
+
+        #print("production:              {}".format(results[0]))
+        #print("consumption:             {}".format(results[1]))
+        #print("daily_production:        {}".format(results[2]))
+        #print("daily_consumption:       {}".format(results[3]))
+        #print("seven_days_production:   {}".format(results[4]))
+        #print("seven_days_consumption:  {}".format(results[5]))
+        #print("lifetime_production:     {}".format(results[6]))
+        #print("lifetime_consumption:    {}".format(results[7]))
+        #print("inverters_production:    {}".format(results[8]))
 
 
 if __name__ == "__main__":
